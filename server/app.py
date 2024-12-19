@@ -1,160 +1,139 @@
+
 #!/usr/bin/env python3
 
-from flask import request, session, jsonify
+from flask import request, session
 from flask_restful import Resource
 from sqlalchemy.exc import IntegrityError
 
 from config import app, db, api
 from models import User, Recipe
 
-class Signup(Resource):
-    def post(self):
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-        image_url = data.get('image_url')
-        bio = data.get('bio')
+@app.before_request
+def check_if_logged_in():
+    open_access_list = [
+        'signup',
+        'login',
+        'check_session'
+    ]
 
-        if not username or not password:
-            return {'errors':['Username and password are required']}, 422
-        
+    if (request.endpoint) not in open_access_list and (not session.get('user_id')):
+        return {'error': '401 Unauthorized'}, 401
+
+
+class Signup(Resource):
+    
+    def post(self):
+
+        request_json = request.get_json()
+
+        username = request_json.get('username')
+        password = request_json.get('password')
+        image_url = request_json.get('image_url')
+        bio = request_json.get('bio')
+
+        user = User(
+            username=username,
+            image_url=image_url,
+            bio=bio
+        )
+
+        # the setter will encrypt this
+        user.password_hash = password
+
         try:
-            user = User(username=username, image_url=image_url, bio=bio)
-            user.password_hash = password  # Hash the password
+
             db.session.add(user)
             db.session.commit()
 
-            # Save the user's ID in the session
             session['user_id'] = user.id
 
-            # Return a JSON response with the user's details
-            return {
-                "id": user.id,
-                "username": user.username,
-                "image_url": user.image_url,
-                "bio": user.bio
-            }, 201
+            return user.to_dict(), 201
 
         except IntegrityError:
-            db.session.rollback()
-            return {"errors": ["Username already taken"]}, 422
-        
-        except Exception as e:
-            db.session.rollback()
-            return {"errors": [str(e)]}, 500
 
-
+            return {'error': '422 Unprocessable Entity'}, 422
 
 class CheckSession(Resource):
+
     def get(self):
-        user_id = session.get('user_id')
+        
+        user_id = session['user_id']
         if user_id:
-            user = db.session.get(User, user_id)  # Use session.get instead of query.get
-            if user:
-                return {
-                    "id": user.id,
-                    "username": user.username,
-                    "image_url": user.image_url,
-                    "bio": user.bio
-                }, 200
-        return {"errors": ["Not logged in"]}, 401
+            user = User.query.filter(User.id == user_id).first()
+            return user.to_dict(), 200
+        
+        return {}, 401
+
 
 class Login(Resource):
+    
     def post(self):
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
 
-        if not username or not password:
-            return {"errors": ["Username and password are required"]}, 422
+        request_json = request.get_json()
 
-        user = User.query.filter_by(username=username).first()
-        if user and user.authenticate(password):
-            session['user_id'] = user.id
-            return {
-                "id": user.id,
-                "username": user.username,
-                "image_url": user.image_url,
-                "bio": user.bio
-            }, 200
-        return {"errors": ["Invalid username or password"]}, 401
+        username = request_json.get('username')
+        password = request_json.get('password')
+
+        user = User.query.filter(User.username == username).first()
+
+        if user:
+            if user.authenticate(password):
+
+                session['user_id'] = user.id
+                return user.to_dict(), 200
+
+        return {'error': '401 Unauthorized'}, 401
 
 class Logout(Resource):
+
     def delete(self):
-        if 'user_id' in session and session['user_id'] is not None:
-            session.pop('user_id', None)
-            return '', 204
-        return {"errors": ["Not logged in"]}, 401
+
+        session['user_id'] = None
+        
+        return {}, 204
+        
 
 class RecipeIndex(Resource):
+
     def get(self):
-        user_id = session.get('user_id')
-        if not user_id:
-            return {"errors": ["Unauthorized"]}, 401
 
-        try:
-            recipes = Recipe.query.filter_by(user_id=user_id).all()
-            recipes_list = [{
-                "id": recipe.id,
-                "title": recipe.title,
-                "instructions": recipe.instructions,
-                "minutes_to_complete": recipe.minutes_to_complete,
-                "user": {
-                    "id": recipe.user.id,
-                    "username": recipe.user.username,
-                    "image_url": recipe.user.image_url,
-                    "bio": recipe.user.bio
-                }
-            } for recipe in recipes]
-
-            return recipes_list, 200
-        except Exception as e:
-            return {"errors": [str(e)]}, 500
-
+        user = User.query.filter(User.id == session['user_id']).first()
+        return [recipe.to_dict() for recipe in user.recipes], 200
+        
+        
     def post(self):
-        user_id = session.get('user_id')
-        if not user_id:
-            return {"errors": ["Unauthorized"]}, 401
 
-        data = request.get_json()
-        title = data.get('title')
-        instructions = data.get('instructions')
-        minutes_to_complete = data.get('minutes_to_complete')
+        request_json = request.get_json()
 
-        if not title or not instructions or len(instructions) < 50:
-            return {"errors": ["Title and instructions are required, and instructions must be at least 50 characters long"]}, 422
-
-        user = User.query.get(user_id)
-        if not user:
-            return {"errors": ["User not found"]}, 404
+        title = request_json['title']
+        instructions = request_json['instructions']
+        minutes_to_complete = request_json['minutes_to_complete']
 
         try:
-            recipe = Recipe(title=title, instructions=instructions, minutes_to_complete=minutes_to_complete, user=user)
+
+            recipe = Recipe(
+                title=title,
+                instructions=instructions,
+                minutes_to_complete=minutes_to_complete,
+                user_id=session['user_id'],
+            )
+
             db.session.add(recipe)
             db.session.commit()
-            return {
-                "id": recipe.id,
-                "title": recipe.title,
-                "instructions": recipe.instructions,
-                "minutes_to_complete": recipe.minutes_to_complete,
-                "user": {
-                    "id": user.id,
-                    "username": user.username,
-                    "image_url": user.image_url,
-                    "bio": user.bio
-                }
-            }, 201
+
+            return recipe.to_dict(), 201
+
         except IntegrityError:
-            db.session.rollback()
-            return {"errors": ["There was an issue saving your recipe."]}, 422
+
+            return {'error': '422 Unprocessable Entity'}, 422
 
 
-# Adding resources to the API
 api.add_resource(Signup, '/signup', endpoint='signup')
 api.add_resource(CheckSession, '/check_session', endpoint='check_session')
 api.add_resource(Login, '/login', endpoint='login')
 api.add_resource(Logout, '/logout', endpoint='logout')
 api.add_resource(RecipeIndex, '/recipes', endpoint='recipes')
+
 
 if __name__ == '__main__':
     app.run(port=5555, debug=True)
